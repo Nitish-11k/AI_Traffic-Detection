@@ -3,19 +3,10 @@ import numpy as np
 from ultralytics import YOLO
 import random
 
-# --- Constants and Configuration ---
-
-# Path to the video file
 VIDEO_FILE = "/home/nickx/PycharmProjects/AITrafficVoilationSystem/Traffic.mp4" # IMPORTANT: Replace with your video file path
 
-# Load the YOLOv8 model
-# 'yolov8n.pt' is a small, fast model. For higher accuracy, consider 'yolov8m.pt' or 'yolov8l.pt'
 model = YOLO('yolov8n.pt')
 
-# --- Violation Detection Logic Configuration ---
-
-# 1. Red Light Violation
-# Define the coordinates for the stop line [ (x1, y1), (x2, y2) ]
 STOP_LINE = [(500, 650), (1300, 650)]
 # A dictionary to keep track of vehicles that have already crossed the stop line
 vehicles_crossed = {}
@@ -124,6 +115,9 @@ while True:
                     dx = last_points[-1][0] - last_points[0][0]
                     dy = last_points[-1][1] - last_points[0][1]
                     movement_vector = np.array([dx, dy])
+
+
+
 
                     # Normalize the movement vector
                     norm = np.linalg.norm(movement_vector)
