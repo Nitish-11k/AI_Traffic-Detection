@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: ai-traffic-detection
+    env: python
+    buildCommand: |
+      pip install -r requirements.txt
+      cd frontend && npm install && npm run build
+    startCommand: |
+      cd backend && python main.py
+    envVars:
+      - key: PORT
+        value: 8000
+      - key: PYTHON_VERSION
+        value: 3.12.3
+    healthCheckPath: /health
+    disk:
+      name: ai-traffic-disk
+      mountPath: /opt/render/project/src
+      sizeGB: 10
