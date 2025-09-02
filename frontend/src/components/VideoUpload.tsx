@@ -67,9 +67,10 @@ const VideoUpload: React.FC = () => {
       websocket.onmessage = (event) => {
         try {
           const message = JSON.parse(event.data);
-          console.log('WebSocket message received:', message.type);
+          console.log('WebSocket message received:', message.type, message.data);
           if (message.type === 'frame') {
             console.log('Frame received:', message.data.frame_number, 'Violations:', message.data.total_violations);
+            console.log('Setting detection frame with frame number:', message.data.frame_number);
             setDetectionFrame(`data:image/jpeg;base64,${message.data.frame_data}`);
             setDetectionFrameNumber(message.data.frame_number);
             setTotalViolations(message.data.total_violations);

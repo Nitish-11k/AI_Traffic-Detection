@@ -147,14 +147,17 @@ class VideoProcessor:
                     # Create display frame with annotations
                     display_frame = self._create_display_frame(frame, frame_violations, frame_number, fps)
                     
-                    # Broadcast frame via WebSocket
+                    # Broadcast frame via WebSocket with actual frame number
                     await self._broadcast_frame(display_frame, frame_number, len(violations))
                     
-                    # Add small delay to simulate real-time video (much faster)
+                    # Add small delay to simulate real-time video (faster but visible)
                     frame_delay = 1.0 / fps  # Calculate delay based on video FPS
-                    await asyncio.sleep(frame_delay * 0.1)  # Much faster for better performance
+                    await asyncio.sleep(frame_delay * 0.2)  # Faster but still visible
                     
                     processed_frames += 1
+                    
+                    # Log frame broadcasting for debugging
+                    logger.info(f"Broadcasting frame {frame_number} with {len(frame_violations)} violations")
                 
                 frame_number += 1
                 
@@ -273,10 +276,13 @@ class VideoProcessor:
             from main import active_connections
             
             # Send to all active connections
+            logger.info(f"Broadcasting frame {frame_number} to {len(active_connections)} connections")
             for connection in active_connections:
                 try:
                     await connection.send_text(json.dumps(message))
-                except:
+                    logger.debug(f"Frame {frame_number} sent successfully")
+                except Exception as e:
+                    logger.error(f"Error sending frame {frame_number}: {str(e)}")
                     # Remove disconnected clients
                     active_connections.remove(connection)
                     

@@ -329,10 +329,10 @@ class TrafficViolationDetector:
                 "id": v.id,
                 "type": v.type,
                 "timestamp": v.timestamp.isoformat(),
-                "confidence": v.confidence,
-                "location": {"x": v.location.x, "y": v.location.y},
+                "confidence": float(v.confidence),  # Convert numpy types to Python float
+                "location": {"x": float(v.location.x), "y": float(v.location.y)},  # Convert numpy types
                 "vehicle_id": v.vehicle_id,
-                "frame_number": v.frame_number,
+                "frame_number": int(v.frame_number),  # Convert to Python int
                 "details": v.details
             }
             for v in self.violation_tracker.violations.values()
@@ -346,10 +346,10 @@ class TrafficViolationDetector:
                 "id": violation.id,
                 "type": violation.type,
                 "timestamp": violation.timestamp.isoformat(),
-                "confidence": violation.confidence,
-                "location": {"x": violation.location.x, "y": violation.location.y},
+                "confidence": float(violation.confidence),  # Convert numpy types
+                "location": {"x": float(violation.location.x), "y": float(violation.location.y)},
                 "vehicle_id": violation.vehicle_id,
-                "frame_number": violation.frame_number,
+                "frame_number": int(violation.frame_number),
                 "details": violation.details
             }
         return None
