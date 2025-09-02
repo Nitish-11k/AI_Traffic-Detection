@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>WebSocket Test</title>
+</head>
+<body>
+    <h1>WebSocket Connection Test</h1>
+    <div id="status">Connecting...</div>
+    <div id="messages"></div>
+    <div id="frame-count">Frames received: 0</div>
+    <div id="violation-count">Violations: 0</div>
+    <img id="video-frame" style="max-width: 400px; max-height: 300px; border: 1px solid #ccc;">
+
+    <script>
+        let frameCount = 0;
+        let violationCount = 0;
+        
+        const ws = new WebSocket('ws://localhost:8000/ws');
+        const status = document.getElementById('status');
+        const messages = document.getElementById('messages');
+        const frameCountDiv = document.getElementById('frame-count');
+        const violationCountDiv = document.getElementById('violation-count');
+        const videoFrame = document.getElementById('video-frame');
+
+        ws.onopen = function(event) {
+            status.textContent = 'Connected to WebSocket';
+            status.style.color = 'green';
+            console.log('WebSocket connected');
+            
+            // Send ping to keep connection alive
+            ws.send(JSON.stringify({ type: 'ping' }));
+        };
+
+        ws.onmessage = function(event) {
+            try {
+                const message = JSON.parse(event.data);
+                console.log('Received message:', message);
+                
+                if (message.type === 'frame') {
+                    frameCount++;
+                    violationCount = message.data.total_violations;
+                    
+                    frameCountDiv.textContent = `Frames received: ${frameCount}`;
+                    violationCountDiv.textContent = `Violations: ${violationCount}`;
+                    
+                    // Display the frame
+                    videoFrame.src = `data:image/jpeg;base64,${message.data.frame_data}`;
+                    
+                    // Add message to log
+                    const messageDiv = document.createElement('div');
+                    messageDiv.textContent = `Frame ${message.data.frame_number}: ${message.data.total_violations} violations`;
+                    messages.appendChild(messageDiv);
+                    
+                    // Keep only last 10 messages
+                    while (messages.children.length > 10) {
+                        messages.removeChild(messages.firstChild);
+                    }
+                }
+            } catch (error) {
+                console.error('Error parsing message:', error);
+            }
+        };
+
+        ws.onclose = function(event) {
+            status.textContent = 'WebSocket disconnected';
+            status.style.color = 'red';
+            console.log('WebSocket disconnected');
+        };
+
+        ws.onerror = function(error) {
+            status.textContent = 'WebSocket error';
+            status.style.color = 'red';
+            console.error('WebSocket error:', error);
+        };
+
+        // Send periodic pings
+        setInterval(() => {
+            if (ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'ping' }));
+            }
+        }, 30000);
+    </script>
+</body>
+</html>

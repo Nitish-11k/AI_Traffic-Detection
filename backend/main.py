@@ -93,13 +93,24 @@ async def websocket_endpoint(websocket: WebSocket):
     """WebSocket endpoint for real-time violation detection"""
     await websocket.accept()
     active_connections.append(websocket)
+    logger.info(f"WebSocket connection established. Total connections: {len(active_connections)}")
     
     try:
         while True:
-            # Keep connection alive
-            await websocket.receive_text()
+            # Keep connection alive with ping/pong
+            try:
+                # Wait for any message from client (ping, text, etc.)
+                message = await websocket.receive()
+                logger.debug(f"Received WebSocket message: {message}")
+            except Exception as e:
+                logger.error(f"WebSocket receive error: {str(e)}")
+                break
     except WebSocketDisconnect:
-        active_connections.remove(websocket)
+        logger.info("WebSocket disconnected")
+    finally:
+        if websocket in active_connections:
+            active_connections.remove(websocket)
+        logger.info(f"WebSocket connection closed. Total connections: {len(active_connections)}")
 
 async def broadcast_violation(violation: ViolationEvent):
     """Broadcast violation to all connected WebSocket clients"""

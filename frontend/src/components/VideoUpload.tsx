@@ -83,6 +83,17 @@ const VideoUpload: React.FC = () => {
       websocket.onopen = () => {
         console.log('WebSocket connected');
         setWsConnected(true);
+        // Send a ping message to keep connection alive
+        websocket.send(JSON.stringify({ type: 'ping' }));
+        
+        // Send periodic pings to keep connection alive
+        const pingInterval = setInterval(() => {
+          if (websocket.readyState === WebSocket.OPEN) {
+            websocket.send(JSON.stringify({ type: 'ping' }));
+          } else {
+            clearInterval(pingInterval);
+          }
+        }, 30000); // Ping every 30 seconds
       };
       
       websocket.onclose = () => {

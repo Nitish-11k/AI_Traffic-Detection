@@ -277,14 +277,21 @@ class VideoProcessor:
             
             # Send to all active connections
             logger.info(f"Broadcasting frame {frame_number} to {len(active_connections)} connections")
+            disconnected_connections = []
             for connection in active_connections:
                 try:
                     await connection.send_text(json.dumps(message))
                     logger.debug(f"Frame {frame_number} sent successfully")
                 except Exception as e:
                     logger.error(f"Error sending frame {frame_number}: {str(e)}")
-                    # Remove disconnected clients
+                    # Mark for removal
+                    disconnected_connections.append(connection)
+            
+            # Remove disconnected connections
+            for connection in disconnected_connections:
+                if connection in active_connections:
                     active_connections.remove(connection)
+                    logger.info(f"Removed disconnected WebSocket. Remaining connections: {len(active_connections)}")
                     
         except Exception as e:
             logger.error(f"Error broadcasting frame: {str(e)}")
