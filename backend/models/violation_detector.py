@@ -1,6 +1,8 @@
 """
-NORMAL TRAFFIC DETECTOR (Pure Maths Logic)
-No Custom Model Required.
+FINAL ROBUST DETECTOR (FIXED FOR TRAFFIC JAMS & MISSING FILES)
+1. Strict Model Check: Will warn if custom model is missing.
+2. Low Speed Detection: Detects wrong side even in traffic jams.
+3. Smart Helmet Association: Captures passengers even if slightly misaligned.
 """
 
 import cv2
@@ -10,122 +12,169 @@ from typing import Dict, List
 import uuid
 from datetime import datetime, timedelta
 import logging
-from models.data_structures import ViolationEvent, VehicleTracker, SpatialIndex, BoundingBox, TrafficLightState
+import math
+from models.data_structures import ViolationEvent, VehicleTracker, BoundingBox, TrafficLightState
 
 logger = logging.getLogger(__name__)
 
 class TrafficViolationDetector:
     def __init__(self):
-        self.base_model = YOLO("yolov8n.pt")
+        # 1. LOAD YOUR CUSTOM MODEL (Must exist!)
+        try:
+            # Ye file backend folder mein honi chahiye!
+            self.model = YOLO("helmet_model.pt") 
+            logger.info("✅ SUCCESS: Custom Helmet Model Loaded!")
+        except Exception as e:
+            logger.critical("❌ CRITICAL ERROR: 'helmet_model.pt' not found!")
+            logger.critical("👉 Download 'best.pt' from Colab, rename to 'helmet_model.pt' and put in backend folder.")
+            # Fallback (sirf testing ke liye, real detection nahi karega)
+            self.model = YOLO("yolov8n.pt")
+
         self.vehicle_trackers = {}
-        self.violation_tracker = None 
         self.traffic_light = TrafficLightState()
-        self.spatial_index = SpatialIndex()
         
-        # --- CONFIGURATION ---
-        self.stop_line = [(0, 800), (1920, 800)]
-        # Wrong Side: Check Right Half (Pixel 800 to 1920)
-        self.wrong_side_roi = np.array([[800, 0], [1920, 0], [1920, 1080], [800, 1080]], np.int32)
-        # Traffic Flow: Up/Away (0, -1)
-        self.expected_direction = np.array([0, -1]) 
+        # --- CLASS ID CONFIGURATION (CHECK YOUR DATA.YAML IN COLAB) ---
+        # Roboflow usually exports like this. Verify these numbers!
+        self.class_map = {
+            'helmet': 0,      # Agar 'Head' ya 'Helmet' class 0 hai
+            'no_helmet': 1,   # Agar 'No-Helmet' class 1 hai
+            'rider': 2,       # Agar 'Motorcyclist' class 2 hai
+            'vehicle': 3      # Cars/Trucks
+        }
         
-        self.vehicle_classes = ['car', 'motorcycle', 'bus', 'truck', 'auto']
+        # --- WRONG SIDE CONFIGURATION ---
+        # Traffic Jam video ke hisab se coordinates
+        self.wrong_side_poly = np.array([[960, 0], [1920, 0], [1920, 1080], [960, 1080]], np.int32)
+        
+        # Flow: Traffic should go UP (Away from camera) -> Vector (0, -1)
+        self.expected_flow_vector = np.array([0, -1]) 
 
     def process_frame(self, frame, fnum, fps=30):
         violations = []
-        self.traffic_light.update(fnum, fps)
         
-        # Detect
-        results = self.base_model.track(frame, persist=True, verbose=False, conf=0.40, iou=0.5)
+        # Confidence thoda kam kiya taaki door wale bhi detect hon
+        results = self.model.track(frame, persist=True, verbose=False, conf=0.20, iou=0.5)
         
         if not results or not results[0].boxes: return []
-        
-        for box, tid, cls in zip(results[0].boxes.xywh.cpu(), 
-                               results[0].boxes.id.int().cpu().tolist() if results[0].boxes.id is not None else [],
-                               results[0].boxes.cls.int().cpu().tolist()):
+
+        # Data Parsing
+        boxes = results[0].boxes.xyxy.cpu().numpy()
+        cls_ids = results[0].boxes.cls.int().cpu().tolist()
+        track_ids = results[0].boxes.id.int().cpu().tolist() if results[0].boxes.id is not None else [-1] * len(boxes)
+
+        current_riders = []
+        current_helmets = []
+
+        for box, cls_id, track_id in zip(boxes, cls_ids, track_ids):
+            if track_id == -1: continue
+
+            bbox = BoundingBox(float(box[0]), float(box[1]), float(box[2]), float(box[3]))
+            sid = str(track_id)
+
+            if sid not in self.vehicle_trackers:
+                self.vehicle_trackers[sid] = VehicleTracker(sid, bbox)
+            else:
+                self.vehicle_trackers[sid].update(bbox)
             
-            x, y, w, h = box
-            bbox = BoundingBox(float(x-w/2), float(y-h/2), float(x+w/2), float(y+h/2))
-            name = results[0].names[cls]
-            sid = str(tid)
-
-            if w < 40 or h < 40: continue # Ignore noise
-
-            if sid not in self.vehicle_trackers: self.vehicle_trackers[sid] = VehicleTracker(sid, bbox)
-            else: self.vehicle_trackers[sid].update(bbox)
             tracker = self.vehicle_trackers[sid]
 
-            # 1. HELMET (Maths Logic)
-            if name == 'motorcycle' and not tracker.has_violation('no_helmet'):
-                if self._check_no_helmet_maths(tracker, frame):
-                    tracker.add_violation('no_helmet')
-                    violations.append(self._evt('no_helmet', tracker, fnum, fps, "Visual Detection"))
-
-            # 2. WRONG SIDE (Maths Logic)
-            if name in self.vehicle_classes and not tracker.has_violation('wrong_side'):
-                if self._check_wrong_side_vector(tracker):
+            # --- LOGIC 1: WRONG SIDE (Updated for Slow Traffic) ---
+            if self._check_wrong_side_robust(tracker):
+                if not tracker.has_violation('wrong_side'):
                     tracker.add_violation('wrong_side')
-                    violations.append(self._evt('wrong_side', tracker, fnum, fps, "Wrong Direction"))
-        
-        self._clean()
+                    violations.append(self._create_event('wrong_side', tracker, fnum, fps, "Wrong Way Driving"))
+
+            # --- DATA FOR HELMET ---
+            # Map classes correctly
+            if cls_id == self.class_map['rider']:
+                current_riders.append(tracker)
+            elif cls_id == self.class_map['helmet']:
+                current_helmets.append(bbox)
+            
+            # Method A: Direct Model Detection
+            if cls_id == self.class_map['no_helmet']:
+                if not tracker.has_violation('no_helmet'):
+                    tracker.add_violation('no_helmet')
+                    violations.append(self._create_event('no_helmet', tracker, fnum, fps, "No Helmet (Model Detected)"))
+
+        # --- LOGIC 2: HELMET GEOMETRY (Method B) ---
+        for rider in current_riders:
+            if rider.has_violation('no_helmet'): continue
+
+            rider_h = rider.bbox.y2 - rider.bbox.y1
+            
+            # Expanded Head Region (Look UP 15%, Look DOWN 35%)
+            head_roi = BoundingBox(
+                rider.bbox.x1, 
+                rider.bbox.y1 - (rider_h * 0.15), 
+                rider.bbox.x2, 
+                rider.bbox.y1 + (rider_h * 0.35)
+            )
+
+            has_helmet = False
+            for helmet_box in current_helmets:
+                # Check Overlap (IoU)
+                if self._check_overlap(head_roi, helmet_box):
+                    has_helmet = True
+                    break
+            
+            if not has_helmet:
+                rider.add_violation('no_helmet')
+                violations.append(self._create_event('no_helmet', rider, fnum, fps, "No Helmet (Geometry Check)"))
+
+        self._clean_trackers()
         return violations
 
-    def _check_no_helmet_maths(self, tracker, frame):
-        # Crop Top 35% (Head Area)
-        x1, y1, x2, y2 = map(int, [tracker.bbox.x1, tracker.bbox.y1, tracker.bbox.x2, tracker.bbox.y2])
-        h = y2 - y1
-        head_roi = frame[y1:y1+int(h*0.35), x1:x2]
-        if head_roi.size == 0: return False
-        
-        try:
-            # Convert to HSV
-            hsv = cv2.cvtColor(head_roi, cv2.COLOR_BGR2HSV)
-            sat = np.mean(hsv[:,:,1])
-            val = np.mean(hsv[:,:,2])
-            val_std = np.std(hsv[:,:,2])
-            
-            # --- SAFE CONDITIONS (HELMET HAI) ---
-            # 1. Colorful (Red/Yellow/Blue)
-            if sat > 50: return False
-            # 2. Bright White/Silver
-            if val > 165: return False
-            # 3. Shiny Black (Dark + High Reflection/Variance)
-            if 20 < val < 140 and val_std > 18: return False
-            
-            # Agar upar wala kuch nahi mila, toh ye Baal/Skin hai = NO HELMET
-            return True
-        except: return False
+    def _check_wrong_side_robust(self, tracker):
+        # 1. Zone Check
+        center = (int(tracker.bbox.center.x), int(tracker.bbox.center.y))
+        if cv2.pointPolygonTest(self.wrong_side_poly, center, False) < 0: return False
 
-    def _check_wrong_side_vector(self, tracker):
-        if tracker.bbox.center.x < 900: return False # Ignore Left/Center Lane
-        if len(tracker.trajectory) < 6: return False
-        
-        # Calculate Vector
-        start = tracker.trajectory[-6]
+        # 2. History Check
+        if len(tracker.trajectory) < 10: return False
+
+        # 3. Vector Calculation
+        start = tracker.trajectory[-10]
         end = tracker.trajectory[-1]
-        dx, dy = end.x - start.x, end.y - start.y
+        dx = end.x - start.x
+        dy = end.y - start.y
         
-        # Speed check
-        speed = (dx**2 + dy**2)**0.5
-        if speed < 4.0: return False # Too slow
+        # Speed calculation
+        dist = math.sqrt(dx**2 + dy**2)
         
-        # Dot Product
-        vec = np.array([dx, dy]) / speed
-        dot = np.dot(vec, self.expected_direction)
-        
-        # If moving Opposite (< -0.5)
-        return dot < -0.5
+        # --- FIX: Traffic Jam Handling ---
+        # Agar speed bilkul 0 hai (dist < 1.0), toh ignore karo (ruki hui gadi)
+        # Par agar thodi bhi movement hai (dist > 1.0), toh direction check karo
+        if dist < 1.0: return False 
 
-    def _evt(self, type, t, f, fps, reason):
+        # 4. Dot Product         vec = np.array([dx, dy]) / dist
+        dot = np.dot(vec, self.expected_flow_vector)
+
+        # Negative dot product means opposite direction
+        return dot < -0.4
+
+    def _check_overlap(self, boxA, boxB):
+        # Simple overlap check
+        xA = max(boxA.x1, boxB.x1)
+        yA = max(boxA.y1, boxB.y1)
+        xB = min(boxA.x2, boxB.x2)
+        yB = min(boxA.y2, boxB.y2)
+        
+        interArea = max(0, xB - xA) * max(0, yB - yA)
+        
+        # If any significant overlap exists
+        return interArea > 50  # 50 pixels overlap minimum
+
+    def _create_event(self, v_type, tracker, fnum, fps, reason):
         return ViolationEvent(
-            str(uuid.uuid4()), type, datetime.now(), 0.85, t.bbox.center, t.id, f, 
-            {"time": str(timedelta(seconds=int(f/fps))), "reason": reason}
+            str(uuid.uuid4()), v_type, datetime.now(), 0.95, 
+            tracker.bbox.center, tracker.id, fnum, {"reason": reason}
         )
 
-    def _clean(self):
+    def _clean_trackers(self):
         now = datetime.now()
         for k, v in list(self.vehicle_trackers.items()):
-            if (now - v.last_seen).total_seconds() > 3: del self.vehicle_trackers[k]
-            
-    def get_all_violations(self): return []
+            if (now - v.last_seen).total_seconds() > 3:
+                del self.vehicle_trackers[k]
+    
     def add_violation(self, v): pass
