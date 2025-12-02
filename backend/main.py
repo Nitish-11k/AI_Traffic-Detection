@@ -1,31 +1,37 @@
-from fastapi import FastAPI, File, UploadFile, WebSocket, WebSocketDisconnect
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
-import uvicorn
-import asyncio
-import json
 import os
-from typing import List, Dict, Any
 import cv2
-import numpy as np
-from ultralytics import YOLO
-import tempfile
 import shutil
+import tempfile
+import base64  # <--- Added for Image Proof
+import asyncio
+from fastapi import FastAPI, UploadFile, File, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from supabase import create_client, Client
 from datetime import datetime
-import logging
+from typing import List
+from dotenv import load_dotenv
 
 from models.violation_detector import TrafficViolationDetector
-from models.data_structures import ViolationEvent, VehicleTracker, SpatialIndex
-from utils.video_processor import VideoProcessor
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# --- 1. CONFIGURATION ---
+load_dotenv()
 
-app = FastAPI(title="AI Traffic Violation Detection System", version="1.0.0")
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
-# CORS middleware
+if not SUPABASE_URL:
+    SUPABASE_URL = "https://your-project.supabase.co"
+    SUPABASE_KEY = "your-anon-key"
+
+try:
+    supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+    print("✅ Connected to Supabase!")
+except Exception as e:
+    print(f"❌ Supabase Connection Failed: {e}")
+
+app = FastAPI()
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -34,135 +40,201 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Global variables
-detector = None
-active_connections: List[WebSocket] = []
-video_processor = VideoProcessor()
-processing_progress = {"status": "idle", "progress": 0, "message": ""}
+detector = TrafficViolationDetector()
 
-@app.on_event("startup")
-async def startup_event():
-    """Initialize the traffic violation detector on startup"""
-    global detector
-    detector = TrafficViolationDetector()
-    logger.info("Traffic Violation Detection System initialized")
+
+# --- 2. HELPERS (UPDATED FOR IMAGE PROOF) ---
+def push_to_supabase(violation, frame):
+    """
+    Violation data + Image Proof save karta hai
+    """
+    try:
+        # 1. Convert Frame to Base64 String
+        _, buffer = cv2.imencode('.jpg', frame)
+        jpg_as_text = base64.b64encode(buffer).decode('utf-8')
+        image_data = f"data:image/jpeg;base64,{jpg_as_text}"
+
+        # 2. Prepare Data
+        data = {
+            "type": violation.type,
+            "vehicle_id": violation.vehicle_id,
+            "confidence": float(violation.confidence),
+            "created_at": datetime.now().isoformat(),
+            "violation_image": image_data  # <--- Saving Proof
+        }
+
+        # 3. Insert into DB
+        supabase.table("violations").insert(data).execute()
+        print(f"🚀 Saved with PROOF: {violation.type}")
+    except Exception as e:
+        print(f"❌ DB Error: {e}")
+
+
+# --- 3. ENDPOINTS ---
 
 @app.get("/")
-async def root():
-    return {"message": "AI Traffic Violation Detection System API"}
+def home():
+    return {"status": "Online", "message": "AI Traffic System Ready"}
+
 
 @app.get("/health")
-async def health_check():
-    return {"status": "healthy", "timestamp": datetime.now().isoformat()}
+def health():
+    return {"status": "healthy"}
 
+
+# --- A. LIVE VIDEO STREAMING ---
+def generate_frames():
+    video_path = "Traffic.mp4"
+    if not os.path.exists(video_path):
+        video_path = 0
+
+    cap = cv2.VideoCapture(video_path)
+    frame_num = 0
+
+    while cap.isOpened():
+        success, frame = cap.read()
+        if not success:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            continue
+
+        frame_num += 1
+
+        if frame_num % 3 == 0:
+            violations = detector.process_frame(frame, frame_num)
+            for v in violations:
+                # Draw box BEFORE saving so proof has the box
+                x, y = int(v.location.x), int(v.location.y)
+                # Clone frame for clean upload or draw on it
+                proof_frame = frame.copy()
+                cv2.rectangle(proof_frame, (x - 50, y - 50), (x + 50, y + 50), (0, 0, 255), 2)
+                cv2.putText(proof_frame, v.type, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2)
+
+                # Pass frame to save function
+                push_to_supabase(v, proof_frame)
+
+                # Draw on display frame as well
+                cv2.rectangle(frame, (x - 50, y - 50), (x + 50, y + 50), (0, 0, 255), 2)
+                cv2.putText(frame, v.type, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2)
+
+        ret, buffer = cv2.imencode('.jpg', frame)
+        frame_bytes = buffer.tobytes()
+        yield (b'--frame\r\n'
+               b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+
+
+@app.get("/video_feed")
+def video_feed():
+    return StreamingResponse(generate_frames(), media_type="multipart/x-mixed-replace; boundary=frame")
+
+
+# --- B. VIDEO UPLOAD LOGIC ---
 @app.post("/upload-video")
 async def upload_video(file: UploadFile = File(...)):
-    """Upload and process a video file for violation detection"""
-    global processing_progress
+    print(f"📥 Received file: {file.filename}")
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
+        shutil.copyfileobj(file.file, tmp)
+        temp_path = tmp.name
+
+    cap = cv2.VideoCapture(temp_path)
+    frame_count = 0
+    all_violations = []
+
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        frame_count += 1
+        if frame_count % 10 == 0:
+            violations = detector.process_frame(frame, frame_count)
+            for v in violations:
+                # Draw details on proof
+                x, y = int(v.location.x), int(v.location.y)
+                cv2.rectangle(frame, (x - 50, y - 50), (x + 50, y + 50), (0, 0, 255), 2)
+
+                # Save with Proof
+                push_to_supabase(v, frame)
+
+                all_violations.append({
+                    "id": v.id,
+                    "type": v.type,
+                    "timestamp": v.timestamp.isoformat(),
+                    "confidence": v.confidence,
+                    "vehicle_id": v.vehicle_id,
+                    "frame_number": v.frame_number,
+                    "location": {"x": v.location.x, "y": v.location.y}
+                })
+
+    cap.release()
+    os.unlink(temp_path)
+
+    return {
+        "status": "success",
+        "filename": file.filename,
+        "violations": all_violations,
+        "total_violations": len(all_violations)
+    }
+
+
+# --- C. REPORTS DATA ---
+@app.get("/violations")
+def get_violations_history():
+    default_response = {
+        "violations": [],
+        "statistics": {"total_violations": 0, "by_type": {}, "recent_violations": 0, "violation_rate": 0.0}
+    }
+
     try:
-        processing_progress = {"status": "processing", "progress": 0, "message": "Uploading video..."}
-        
-        # Create temporary file
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp_file:
-            shutil.copyfileobj(file.file, tmp_file)
-            temp_path = tmp_file.name
-        
-        processing_progress = {"status": "processing", "progress": 10, "message": "Starting video analysis..."}
-        
-        # Process video and get violations with real-time display
-        violations = await video_processor.process_video_with_display(temp_path, detector)
-        
-        # Clean up temporary file
-        os.unlink(temp_path)
-        
-        processing_progress = {"status": "completed", "progress": 100, "message": "Analysis complete!"}
-        
+        # Fetch data WITH image column
+        response = supabase.table("violations").select("*").order("created_at", desc=True).limit(50).execute()
+        data = response.data
+
+        if not data:
+            return default_response
+
+        stats = {
+            "total_violations": len(data),
+            "by_type": {
+                "red_light": len([v for v in data if v.get('type') == 'red_light']),
+                "wrong_side": len([v for v in data if v.get('type') == 'wrong_side']),
+                "no_helmet": len([v for v in data if v.get('type') == 'no_helmet'])
+            },
+            "recent_violations": len(data),
+            "violation_rate": 0.0
+        }
+
+        formatted_violations = []
+        for v in data:
+            formatted_violations.append({
+                "id": v.get('id'),
+                "type": v.get('type'),
+                "timestamp": v.get('created_at'),
+                "confidence": v.get('confidence', 0.0),
+                "vehicle_id": v.get('vehicle_id', 'Unknown'),
+                "violation_image": v.get('violation_image', ''),  # <--- Sending Image to Frontend
+                "location": {"x": 0, "y": 0}
+            })
+
         return {
-            "status": "success",
-            "filename": file.filename,
-            "violations": violations,
-            "total_violations": len(violations)
+            "violations": formatted_violations,
+            "statistics": stats
         }
     except Exception as e:
-        logger.error(f"Error processing video: {str(e)}")
-        processing_progress = {"status": "error", "progress": 0, "message": str(e)}
-        return {"status": "error", "message": str(e)}
+        print(f"❌ Error: {e}")
+        return default_response
+
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
-    """WebSocket endpoint for real-time violation detection"""
     await websocket.accept()
-    active_connections.append(websocket)
-    logger.info(f"WebSocket connection established. Total connections: {len(active_connections)}")
-    
     try:
-        while True:
-            # Keep connection alive with ping/pong
-            try:
-                # Wait for any message from client (ping, text, etc.)
-                message = await websocket.receive()
-                logger.debug(f"Received WebSocket message: {message}")
-            except Exception as e:
-                logger.error(f"WebSocket receive error: {str(e)}")
-                break
-    except WebSocketDisconnect:
-        logger.info("WebSocket disconnected")
-    finally:
-        if websocket in active_connections:
-            active_connections.remove(websocket)
-        logger.info(f"WebSocket connection closed. Total connections: {len(active_connections)}")
+        while True: await websocket.receive_text()
+    except:
+        pass
 
-async def broadcast_violation(violation: ViolationEvent):
-    """Broadcast violation to all connected WebSocket clients"""
-    if active_connections:
-        message = {
-            "type": "violation",
-            "data": {
-                "id": violation.id,
-                "type": violation.type,
-                "timestamp": violation.timestamp.isoformat(),
-                "confidence": violation.confidence,
-                "location": violation.location,
-                "vehicle_id": violation.vehicle_id
-            }
-        }
-        
-        # Send to all active connections
-        for connection in active_connections:
-            try:
-                await connection.send_text(json.dumps(message))
-            except:
-                # Remove disconnected clients
-                active_connections.remove(connection)
-
-@app.get("/violations")
-async def get_violations():
-    """Get all detected violations"""
-    if detector:
-        return {
-            "violations": detector.get_all_violations(),
-            "statistics": detector.get_violation_statistics()
-        }
-    return {"violations": [], "statistics": {}}
-
-@app.get("/violations/{violation_id}")
-async def get_violation(violation_id: str):
-    """Get specific violation details"""
-    if detector:
-        violation = detector.get_violation_by_id(violation_id)
-        if violation:
-            return violation
-    return {"error": "Violation not found"}
-
-@app.get("/processing-status")
-async def get_processing_status():
-    """Get current video processing status"""
-    return processing_progress
 
 if __name__ == "__main__":
-    import os
-    
-    # Get port from environment variable (for cloud deployment) or default to 8000
-    port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    import uvicorn
 
+    uvicorn.run(app, host="0.0.0.0", port=8000)

@@ -1,4 +1,4 @@
-services:
+sstarservices:
   - type: web
     name: ai-traffic-detection
     env: python

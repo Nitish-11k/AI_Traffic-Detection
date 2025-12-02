@@ -93,7 +93,7 @@ const Dashboard: React.FC = () => {
     { name: 'Red Light', value: stats.by_type.red_light, color: '#ef4444' },
     { name: 'Wrong Side', value: stats.by_type.wrong_side, color: '#f59e0b' },
     { name: 'No Helmet', value: stats.by_type.no_helmet, color: '#8b5cf6' },
-  ] : [];
+] : [];
 
   if (loading) {
     return (

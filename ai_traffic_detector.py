@@ -106,7 +106,7 @@ while True:
                 if track_id not in vehicle_trajectories:
                     vehicle_trajectories[track_id] = []
                 vehicle_trajectories[track_id].append((x_center, y_center))
-
+on t
                 # Analyze trajectory if we have enough points
                 if len(vehicle_trajectories[track_id]) > 5: # Use last 5 points
                     # Get the last 5 points
