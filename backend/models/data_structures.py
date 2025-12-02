@@ -127,6 +127,8 @@ class VehicleTracker:
         self.last_seen = datetime.now()
         self.recorded_violations = set()
         self.violation_count = 0
+        self.meta = {}
+
 
     def update(self, new_bbox: BoundingBox):
         self.bbox = new_bbox
